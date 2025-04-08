@@ -1,0 +1,385 @@
+---
+title: "Parasite Genomics Case Study"
+author: "Jean de Dieu Ngirinshuti"
+date: "2025-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Practical exercise: panel design for a parasite genomics study
+
+```{r}
+rm(list = ls())
+```
+
+```{r, message=FALSE, warning=FALSE}
+rm(list = ls())
+
+# Loading necessary packages
+library(tidyr)
+library(dplyr) # for manipulating the data table
+library(ggplot2) # for plotting
+library(QuasR) # for alignment
+library(stringr) # for string manipulation
+library(dada2) # for running DADA2
+```
+
+
+
+
+
+##############
+# Part I: Panel design 
+##############
+
+
+# Loading the mutation information from MalariaGEN, please change the file path
+```{r}
+cpmp_mut = read.delim("D:/OneDrive/Master's Class notes/AIMS Rwanda - Mathematical Sciences - Epidemiology/Review Phase/Genomics and Bioinformatics/Case Study/Part I_III/cpmp_malariaGEN_mut.txt", header = TRUE)
+
+head(x = cpmp_mut, n = 15)
+```
+
+# How many rows does the data table with mutation information have? Fill out your response:
+```{r}
+n_rows_cpmp_mut = nrow(cpmp_mut)
+print(n_rows_cpmp_mut)
+```
+
+Data Cleaning
+
+# Separating the data in the alternatives
+
+```{r}
+cpmp_mut_long = separate_longer_delim(cpmp_mut, c(Alternative, Frequency), delim = ",")
+head(cpmp_mut_long, 10)
+```
+
+# Converting mutation frequency is numeric
+```{r}
+cpmp_mut_long$Frequency = as.double(cpmp_mut_long$Frequency)
+```
+
+# Checking all types of sequence variation (SNPs, indels, insertions, ...) in the data table
+```{r}
+print(sort(unique(cpmp_mut_long$Alternative)))
+```
+
+# We need to remove the non-relevant sequence variations in the Alternative column and keep only the SNPs. Same applies to the Reference column.
+
+```{r}
+cpmp_SNPs = cpmp_mut_long %>% filter(Reference %in% c("A", "T", "C", "G") & Alternative %in% c("A", "T", "C", "G"))
+
+head(cpmp_SNPs, 20)
+```
+
+# The data table contains now at each mutated position on the cpmp gene, the mutation frequency for each observed mutation in the malariaGEN samples. This corresponds to the information of how often this mutation is observed in the population of samples from malariaGEN.
+
+# Plot the mutation frequencies (column Frequency) at each position (column Position). The x-axis should represent the position on the cpmp gene and the y-axis the mutation frequency.
+```{r}
+ggplot(cpmp_SNPs, aes(x = Position, y = Frequency)) + 
+  geom_point() + theme_minimal()
+```
+
+# We need to select the SNPs of atleast 1% frequency in the population of samples from malariaGEN. This corresponds to the information of how often this mutation is observed in the population of samples from malariaGEN.
+```{r}
+cpmp_SNPs_1 <- cpmp_SNPs %>% filter(Frequency>0.01)
+dim(cpmp_SNPs_1)
+```
+
+# Plot the mutation frequencies (column Frequency) at each position (column Position) for the SNPs with at least 1% frequency. The x-axis should represent the position on the cpmp gene and the y-axis the mutation frequency.
+```{r}
+ggplot(cpmp_SNPs_1, aes(x = Position, y = Frequency)) + 
+  geom_point() + theme_minimal()
+```
+
+# Our targeted marker region cannot be longer than 300 nucleotides. You will need to further narrow it down. Using the formula, calculate the expected heterozygosity for the considered genomic region.
+```{r}
+He = cpmp_SNPs_1 %>% group_by(Position) %>% summarise(He = 1 - (sum(Frequency^2) + (1-sum(Frequency))^2))
+print(He)
+```
+
+# Plotting the expected heterozygosity at each position (column Position) for the SNPs with at least 1% frequency. The x-axis should represent the position on the cpmp gene and the y-axis the expected heterozygosity.
+```{r}
+ggplot(He, aes(x = Position, y = He)) + 
+  geom_line(color = "darkred") + theme_minimal() + scale_x_continuous(n.breaks = 10) + geom_point() + 
+  scale_y_continuous(limits = c(0, 0.75)) 
+```
+
+```{r}
+He_filtered <- He %>% filter(Position >= 180025 & Position <= 180325)
+                             
+ggplot(He_filtered, aes(x = Position, y = He)) + 
+  geom_line(color = "darkred") + theme_minimal() + scale_x_continuous(n.breaks = 10) + geom_point() + 
+  scale_y_continuous(limits = c(0, 0.75)) 
+```
+
+# Defining the narrower regions using He. We will select the region with the highest expected heterozygosity.
+```{r}
+cpmp_SNPs_w = cpmp_SNPs_1 %>% filter(Position >=  180025 & Position <= 180325)
+head(cpmp_SNPs_w)
+```
+
+```{r}
+ggplot(cpmp_SNPs_w, aes(x = Position, y = Frequency)) + 
+  geom_point(color = "red") + theme_minimal() + scale_x_continuous(n.breaks = 10)
+```
+
+
+
+
+
+
+
+##############
+# Part II & III: Haplotype calling, classification of infections and treatment efficacy estimation
+##############
+
+# Specify the reference genome file which is in fasta format (.fa, .fna). This reference will be used for alignment.
+```{r}
+genomeFile = "reference_HB37.fna"
+```
+
+# Load the text file containing definitions of sample names and fastq file paths. This text file will be used for localizing the sequencing reads.
+```{r}
+sampleFile = "samples_info.txt"
+```
+
+# Run the sequence alignment.
+```{r}
+proj = qAlign(sampleFile, genomeFile)
+```
+
+# Checking how many reads were aligned from each sample
+```{r}
+alignmentStats(proj) 
+```
+
+
+
+
+
+##############
+# PART 1: Haplotype identification with the DADA2 R package
+##############
+
+# Set the directory to the folder that you downloaded on your computer
+```{r, message=FALSE, warning=FALSE}
+# Set the directory to the folder that you downloaded on your computer
+path = "D:/OneDrive/Master's Class notes/AIMS Rwanda - Mathematical Sciences - Epidemiology/Review Phase/Genomics and Bioinformatics/Case Study/Part I_III/PP"
+setwd(path)
+```
+
+# Define forward and reverse fastq filenames have format: SAMPLENAME_F.fastq and SAMPLENAME_R.fastq
+```{r}
+fnFs = sort(list.files(path, pattern="_F.fastq", full.names = TRUE))
+fnRs = sort(list.files(path, pattern="_R.fastq", full.names = TRUE))
+```
+
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+```{r}
+sample.names = gsub("_F.fastq", "", basename(fnFs))
+sample.names
+```
+
+# Inspect the quality of the reads
+```{r}
+plotQualityProfile(fnFs)
+plotQualityProfile(fnRs)
+```
+
+# Specify the filtered/ subdirectory to place the filtered reads
+```{r}
+filtFs = file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs = file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) = sample.names
+names(filtRs) = sample.names
+```
+
+# Filter reads based on the observations on the plots
+```{r}
+out = filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(200, 200),
+                     maxN = 0, maxEE = c(2, 2), truncQ = 2, rm.phix = TRUE,
+                     compress = TRUE, multithread = FALSE) # On Windows set multithread=FALSE
+head(out)
+```
+
+# Inspect the quality of the filtered reads
+```{r}
+plotQualityProfile(filtFs)
+plotQualityProfile(filtRs)
+```
+
+# Learn the error rates from the filtered reads
+```{r}
+errF = learnErrors(filtFs)
+errR = learnErrors(filtRs)
+```
+
+# Plot the inferred error rates
+```{r}
+plotErrors(errF)
+plotErrors(errR)
+```
+
+# Finally call the haplotypes
+```{r}
+dadaFs = dada(filtFs, err = errF)
+dadaRs = dada(filtRs, err = errR)
+```
+
+# Merge the forward and reverse reads and assign them to haplotypes
+```{r}
+mergers = mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+```
+
+# Inspect the merger data.frame from the first sample
+```{r}
+head(mergers[[1]])
+```
+
+# Construct sequence table
+```{r}
+seqtab = makeSequenceTable(mergers)
+dim(seqtab)
+```
+
+# Remove chimeras
+```{r}
+seqtab.nochim = removeBimeraDenovo(seqtab, method = "consensus", 
+                                   multithread = FALSE, verbose=TRUE)
+```
+
+# Print the number of the remaining haplotypes
+```{r}
+dim(seqtab.nochim)
+```
+
+# Let's have a look at the identified haplotypes
+```{r}
+seq1 = colnames(seqtab.nochim)[1]
+seq2 = colnames(seqtab.nochim)[2]
+seq3 = colnames(seqtab.nochim)[3]
+
+print(paste("Haplotype 1:", seq1))
+print(paste("Haplotype 2:", seq2))
+print(paste("Haplotype 3:", seq3))
+```
+
+# Split the strings into individual characters to be able to compare them
+```{r}
+str1_chars = strsplit(seq1, "")[[1]]
+str2_chars = strsplit(seq2, "")[[1]]
+str3_chars = strsplit(seq3, "")[[1]]
+```
+
+# Compare the strings character by character and find positions where they differ
+```{r}
+diff_positions1 = which(str1_chars != str2_chars)
+diff_positions2 = which(str2_chars != str3_chars)
+diff_positions3 = which(str1_chars != str3_chars)
+```
+
+
+
+
+
+
+##############
+# PART 2: Classification of infections and calculation of treatment efficacy
+##############
+
+# Loading the haplotypes identified for each marker
+```{r}
+all_haplotypes = read.csv("haplotypes_in_samples.csv")
+```
+
+# Printing the first lines to see how the table looks like
+```{r}
+head(all_haplotypes, 5)
+colnames(all_haplotypes)
+```
+
+# Observe the naming convention for the samples. Identify the unique patient IDs
+```{r}
+sample_pairs = unique(all_haplotypes$SampleName)
+table(all_haplotypes$SampleName == "_D0")
+```
+
+# Extract only the patient IDs (remove the "_D0", "_DX") T
+```{r}
+samples = unique(substr(sample_pairs, 1, str_locate(sample_pairs, "_") - 1))
+print(samples)
+```
+
+#### Identify for each marker whether we observe a recrudescence or new infection
+```{r}
+# Initialise the results table
+result_tab = NULL
+
+# Extract the list with the three marker names
+marker_list = unique(all_haplotypes$MarkerID)
+
+# Loop over all markers
+for (marker in marker_list) {
+  # Select only the rows corresponding to the selected marker
+  hap_m = all_haplotypes %>% filter(MarkerID == marker)
+  
+  # Loop through all the samples
+  
+  for (s in samples) {
+    # Reconstruct the Day 0 and Day X names 
+    s_D0 = paste0(s, "_D0")
+    s_DX = paste0(s, "_DX")
+    # Extract the haplotypes at day 0 and Day X
+    hap_D0 = hap_m %>% filter(SampleName == s_D0)
+    hap_DX = hap_m %>% filter(SampleName == s_DX)
+    
+    # Print the intersection
+    common_haplotypes = intersect(hap_D0$Haplotype, hap_DX$Haplotype)
+    print(common_haplotypes)
+    
+    # Check if the sets of haplotypes intersect (then recrudescence)
+    if(length(common_haplotypes) > 0) {
+      # Recrudescence!
+      infection_type = "R"
+    } else {
+      infection_type = "NI"
+    }
+    # Append the new result for the considered sample pair and marker
+    line = data.frame(SampleName = s, Marker = marker, InfectionType = infection_type)
+    result_tab = rbind(result_tab, line)
+  }
+}
+
+print(result_tab)
+```
+
+```{r}
+# Count how many times you observe recrudescence across the three markers for each sample pair
+n_r = result_tab %>% group_by(SampleName) %>% summarise(Recrudescence = sum(InfectionType == "R"))
+print(n_r)
+
+```
+
+# Count how many recrudescences are identified with the 3/3 algorithm
+```{r}
+n_3_3 = sum(n_r$Recrudescence == 3)
+
+# Calculate the therapeutic efficacy with the result from the 3/3 algorithm
+t_eff_3_3 = (1-(n_3_3/length(n_r$SampleName)))*100
+print(t_eff_3_3)
+```
+
+# Count how many recrudescences are identified with the 2/3 algorithm
+```{r}
+n_2_3 = sum(n_r$Recrudescence >= 2)
+
+# Calculate the therapeutic efficacy with the result from the 3/3 algorithm
+t_eff_2_3 = (1-(n_2_3/length(n_r$SampleName)))*100
+print(t_eff_2_3)
+```
+
